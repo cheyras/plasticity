@@ -13,9 +13,12 @@ jobs:
           cache: yarn
       - name: Install ripgrep
         run: sudo apt-get update && sudo apt-get install -y ripgrep
-      - name: Yarn install
-        env:
-          YARN_ENABLE_SCRIPTS: "false"
-        run: yarn install --frozen-lockfile
       - name: Lint SPDX headers
-        run: yarn lint:spdx
+        run: |
+          missing=$(rg --files-without-match 'SPDX-License-Identifier' -g '!LICENSE' src/automation plasticity-mcp-bridge || true)
+          if [ -n "$missing" ]; then
+            echo "Files missing SPDX-License-Identifier header:"
+            echo "$missing"
+            exit 1
+          fi
+          echo "All files in src/automation and plasticity-mcp-bridge carry SPDX headers."
