@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 cheyras
+name: Lint
+on: [push, pull_request]
+jobs:
+  spdx:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: yarn
+      - name: Yarn install
+        run: yarn install --frozen-lockfile
+      - name: Lint SPDX headers
+        run: yarn lint:spdx

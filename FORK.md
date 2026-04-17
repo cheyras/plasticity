@@ -52,6 +52,7 @@ This fork preserves and complies with the upstream LGPL-3.0-or-later license:
 | forge.config.js | 0 | Added `@electron-forge/plugin-auto-unpack-natives` plugin in Plan 03 to handle `ws`'s optional native deps (`bufferutil`, `utf-8-validate`) when Phase 1 opts in. |
 | .github/workflows/ci.yml | 0 | Extended existing linux job with `Lint SPDX headers` step running `yarn lint:spdx` (positioned between Yarn install and Codegen for fail-fast cost savings) in Plan 02. |
 | .gitignore | 0 | Added local-only agent workspace patterns (`.planning/`, `.claude/`, `CLAUDE.md`) so planning artifacts stay out of the public fork. |
+| .github/workflows/lint.yml | quick-260417-4jp | **Fork-only added file (not an upstream modification).** Secret-free lint-only CI workflow; runs `yarn lint:spdx` on ubuntu-latest + Node 20 to close the Phase 00 UAT Test 1 verification gap (ci.yml blocked by unavailable c3d credentials). Satisfies FORK-05 (enumerating fork additions) and SEC-03 (SPDX lint execution proof). |
 
 <!-- Deferred row (add only if Phase 2 applies the DISC-07 mutex patch — see DISCOVERY.md DISC-07):
 | src/command/GeometryFactory.ts | 2 | Wrap c3d.Mutex Enter/Exit in try/finally at lines 279/281 and 349/351 to prevent deadlock on kernel exceptions (DISC-07). |
