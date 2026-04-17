@@ -133,3 +133,7 @@ MathematicalNode.txt
 Converter.txt
 
 SCRATCH
+
+# Local planning / agent configs (not part of fork)
+.planning/
+.claude/
