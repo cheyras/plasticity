@@ -263,3 +263,97 @@ and re-verified by reading the source line at each position. The lines match (e.
 - PATTERNS.md line 44 noted the corrected `CornerBoxFactory:143` line.
 - All other lines verified by `rg -n` at execution time (see grep sweep output captured during Task 3 execution).
 
+## DISC-07 — c3d.Mutex re-entrancy investigation
+
+**Verified:** 2026-04-17
+
+**Question (REQ-DISC-07):** Is `c3d.Mutex.EnterParallelRegion` re-entrant or deadlock-prone? Determines whether an upstream try/finally patch to `src/command/GeometryFactory.ts:349/351` is mandatory before Phase 2 ships `create_box`.
+
+**Method (per D-09):** Read the deepest publicly-readable layer of the N-API binding stack first; fall through to an empirical stress test if the C++ implementation is not accessible. In this repo the C++ implementation is NOT accessible (see vendor/c3d finding below), so the readable layers are: the auto-generated binding declaration in `generate/api.mjs`, the hand-written addon source in `generate/manual/`, and the TypeScript call sites in `src/command/GeometryFactory.ts`.
+
+**Sources inspected:**
+
+- `.gitignore:102` — confirms `/vendor/c3d` is gitignored (line 102: `/vendor/c3d`; line 103: `/vendor/c3d.old`). C3D source headers (including `tool_mutex.h`) are NOT in the public repo. Local build artifact present at `vendor/c3d/Include/tool_mutex.h`: **no** (only `vendor/microsoft/` exists in this worktree). The C3D implementation cannot be read from this checkout.
+- `generate/api.mjs:2068-2074` — auto-generated binding declaration for `c3d.Mutex`:
+  ```
+  Mutex: {
+      rawHeader: "tool_mutex.h",
+      functions: [
+          "void EnterParallelRegion()",
+          "void ExitParallelRegion()"
+      ]
+  },
+  ```
+  The binding references `tool_mutex.h` (gitignored, see above). The two exposed functions are void-returning, non-re-entrancy-annotated, and carry no inline documentation. The binding generator does not emit any lock-type metadata, so this layer cannot answer whether the underlying lock is `std::mutex` (non-re-entrant, would deadlock on re-entry) or `std::recursive_mutex` (re-entrant).
+- `generate/manual/` — hand-written addon source: **no Mutex references found** (grep for `Mutex|EnterParallelRegion|ExitParallelRegion` across `generate/manual/` returned zero matches). Confirms the `c3d.Mutex` binding is PURELY auto-generated from `generate/api.mjs`; there is no hand-written wrapper that could have overlaid re-entrancy semantics.
+- `src/command/GeometryFactory.ts` — three Enter/Exit call sites (verified line numbers match the plan's asserted pairs 248/268, 279/281, 349/351 exactly):
+  - **Lines 248/268 (`update` method, `none | failed | updated` branch):** wrapped in `try { ... } catch (e) { this.state.failed = e ... } finally { c3d.Mutex.ExitParallelRegion(); ... }`. SAFE — any throw between Enter and Exit is caught and the mutex is always released in the finally. No patch needed at this site.
+  - **Lines 279/281 (`update` method, `'updating'` branch with `phantoms-completed` step):** BARE pair. Source:
+    ```ts
+    c3d.Mutex.EnterParallelRegion();
+    await this.doPhantoms(abortEarly);
+    c3d.Mutex.ExitParallelRegion();
+    ```
+    If `doPhantoms(abortEarly)` rejects/throws, line 281 never executes and the mutex is leaked. No try/finally protection.
+  - **Lines 349/351 (`commit` method — canonical patch target per D-10):** BARE pair inside a try/catch but with NO finally. Source:
+    ```ts
+    try {
+        c3d.Mutex.EnterParallelRegion();
+        const result = await this.doCommit();
+        c3d.Mutex.ExitParallelRegion();
+        this.state = { tag: 'committed' };
+        this.signals.factoryCommitted.dispatch();
+        return result;
+    } catch (error) {
+        this.state = { tag: 'failed', error };
+        this.doCancel();
+        this.signals.factoryCancelled.dispatch();
+        throw error;
+    }
+    ```
+    If `doCommit()` throws, line 351 never executes; the catch block runs `doCancel()` / dispatches / re-throws but never calls `ExitParallelRegion`. Mutex is leaked on any kernel exception during commit. This matches PITFALLS.md's exact analysis (lines 263-267).
+- `.planning/research/PITFALLS.md:153, 263-295, 428, 448, 486` — PITFALLS.md already flagged this pattern as a known risk. Key excerpts:
+  - Line 263: "BUT: `c3d.Mutex.EnterParallelRegion()` was called on line 349; the throw happens inside `doCommit()`. The outer try/catch on line 355 catches — but does `ExitParallelRegion` get called? Looking at GeometryFactory.ts:349-362 — `Mutex.ExitParallelRegion()` is on line 351, *before* the catch. If `doCommit()` throws, line 351 never executes → mutex stuck."
+  - Line 267: "Even if the mutex is re-entrant, the C3D objects allocated before the throw (partial geometry, name makers, intermediate solids) may not all be refcount-released because finalizers assume success. The kernel's native side may leak."
+  - Line 273: "Verify mutex behavior: read the C3D N-API binding source. Confirm whether `EnterParallelRegion` stacks re-entries or not. If it does, fine. If not, patch GeometryFactory.ts to wrap in try/finally."
+  - Line 448: "C3D mutex leak | MEDIUM | Short-term: user restarts Plasticity; long-term: upstream try/finally patch".
+
+**Path correction (carried forward to all later phases):** `src/command/GeometryFactory.ts` is at `command` (SINGULAR), not `commands` (plural). PROJECT.md, CONTEXT.md, REQUIREMENTS.md DISC-07 reference the wrong path. Mutex Enter/Exit lines are at **248/268, 279/281, 349/351** (NOT the 349-362 range CONTEXT.md asserts — verified by reading the file directly; the 349-362 range actually spans from Enter on line 349 through the end of the catch clause on line 360, which misrepresents the Enter/Exit pair as a single 13-line block). This correction appears in PATTERNS.md correction #1 and must appear in FORK.md if a patch lands in Phase 2.
+
+**Conclusion:** **(iii) UNRESOLVED-PENDING-RUNTIME-EXPERIMENT**
+
+**Rationale:** The publicly-readable binding layers (`generate/api.mjs`, `generate/manual/`) expose only the function signatures `void EnterParallelRegion()` / `void ExitParallelRegion()` with no metadata about the underlying lock type. The C3D header `tool_mutex.h` which would definitively identify the lock as `std::mutex` (non-re-entrant) vs `std::recursive_mutex` (re-entrant) is in the gitignored `vendor/c3d/` tree and is not present in this checkout. Therefore:
+
+- We cannot declare **(i) PATCH NEEDED** with full certainty: if the underlying lock is a `std::recursive_mutex`, re-entry from the same thread would succeed and the "leaked" mutex on throw would self-resolve on the next call from the same thread. However, the call sites at 279/281 and 349/351 ARE bare (no finally), which is a structural defect regardless of lock type — and PITFALLS.md line 267 notes that even a re-entrant lock doesn't prevent the separate concern of C3D object-refcount leaks on exception.
+- We cannot declare **(ii) NO PATCH NEEDED**: the 248/268 site IS wrapped in try/finally, but the two other sites are not, and there is no source comment justifying the asymmetry. The presence of the try/finally at 248/268 strongly SUGGESTS the original author knew the lock is not self-resetting (otherwise the finally is pointless), which is circumstantial evidence that 279/281 and 349/351 are unintentional omissions rather than intentional optimizations.
+- Therefore **(iii)** is the honest answer: the code pattern at 248/268 vs 279/281 / 349/351 is strongly suggestive of patch-needed, but conclusive proof requires either reading `tool_mutex.h` OR running an empirical stress test. Phase 2 entry must resolve this before shipping `create_box`.
+
+**Experiment definition for Phase 2 entry:**
+
+> 1. With a working Plasticity dev build (C3D licensed, `yarn build` succeeded), open the renderer in a Jest integration test harness.
+> 2. Construct a `BoxFactory` with deliberately-degenerate inputs (e.g., `p1 == p2` so the box has zero volume → kernel throws inside `doCommit()`). Call `factory.commit()` and catch the throw.
+> 3. Immediately construct a fresh valid `BoxFactory` with normal inputs and call `factory.commit()` with a 5-second timeout that fails the test on hang.
+> 4. Outcomes:
+>    - Second call HANGS → mutex leaked → Phase 2 MUST add try/finally wrapping at lines 248/268 (already done — verify unchanged), 279/281, and 349/351.
+>    - Second call SUCCEEDS → mutex is re-entrant or self-resetting → no patch needed, but the bare pairs should still be cleaned up defensively in a Phase 6 hardening pass (low priority).
+> 5. Repeat the test 50 times to confirm the result is consistent (per D-09 stress threshold).
+
+**If Phase 2 experiment confirms PATCH NEEDED, the patch site:**
+
+- File: `src/command/GeometryFactory.ts`
+- Sites requiring patch: **lines 279/281** (update method, phantoms-completed branch) and **lines 349/351** (commit method — canonical target per D-10). Lines 248/268 are already correctly wrapped and need no change.
+- Form: wrap `c3d.Mutex.EnterParallelRegion()` and `c3d.Mutex.ExitParallelRegion()` in try/finally so any throw between them releases the lock. For the commit method (349/351), this means restructuring to put Enter before a nested try, and Exit in a finally, while preserving the outer try/catch that sets the `'failed'` state and re-throws.
+- Per D-10: this is a modification to an upstream file. Plan 06 MUST NOT add this row to FORK.md modifications table NOW (no patch has landed); the row is added by Phase 2 if and when the patch is applied: `| src/command/GeometryFactory.ts | ~4 | Wrap c3d.Mutex Enter/Exit in try/finally at lines 279/281 and 349/351 to prevent deadlock on kernel exceptions (DISC-07) |`.
+
+**Implication for Phase ordering (per D-11):**
+
+- Phase 1 (transport, auth, IPC, preferences) is UNBLOCKED regardless of DISC-07 conclusion — Phase 1 makes no factory calls and never touches `c3d.Mutex`.
+- Phase 2 (Command Integration, first factory call `create_box`) IS BLOCKED until DISC-07 reaches conclusion (i) or (ii). The current conclusion is (iii), so Phase 2 entry MUST run the experiment above FIRST and update this section of DISCOVERY.md with the resolved conclusion before any `create_box` wire work proceeds.
+
+**Reference:**
+- D-09 (investigation strategy with empirical fallback)
+- D-10 (patch site if needed: src/command/GeometryFactory.ts)
+- D-11 (blocks Phase 2 only; Phase 1 independent)
+- PATTERNS.md correction #1 (path: src/command/, not src/commands/) and correction #3 (vendor/c3d/ gitignored — binding-only visibility)
+- PITFALLS.md lines 263-295 (independent analysis reaching the same suspected-leak conclusion) and line 448 (risk-register entry)
+- STATE.md "Open Questions" — DISC-07 listed as an open question to resolve at Phase 0 (partially resolved here; conclusive resolution deferred to Phase 2 entry experiment)
