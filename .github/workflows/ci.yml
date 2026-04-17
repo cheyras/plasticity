@@ -86,6 +86,9 @@ jobs:
       - name: Yarn install
         run: |
           yarn install --frozen-lockfile
+      - name: Lint SPDX headers
+        run: |
+          yarn lint:spdx
       - name: Cache C++ build
         id: cache-cpp-build
         uses: actions/cache@v2
