@@ -12,6 +12,8 @@ jobs:
           node-version: '20'
           cache: yarn
       - name: Yarn install
-        run: yarn install --frozen-lockfile --ignore-scripts
+        env:
+          YARN_ENABLE_SCRIPTS: "false"
+        run: yarn install --frozen-lockfile
       - name: Lint SPDX headers
         run: yarn lint:spdx
