@@ -205,3 +205,61 @@ All three formatters use the same pattern `kind,parentId,index` with **comma** s
 
 **Reference:** STATE.md correction note carried forward; PITFALLS.md Pitfall #1; PROJECT.md "Key Decisions Locked" table.
 
+
+## DISC-05 — Factory file path verification (v1 surface)
+
+**Verified:** 2026-04-17
+
+**Files inspected:**
+- All `src/commands/<category>/*Factory.ts` for the 13 v1 wire-names from REQUIREMENTS.md REG-01..13.
+
+**Question (REQ-DISC-05):** Verify every factory referenced in the v1 surface exists at the expected path; record verified `path:line` for each.
+
+**Format:** markdown table per D-03 (columns `wire_name | factory_class | path:line`).
+
+| wire_name | factory_class | path:line |
+|-----------|---------------|-----------|
+| create_box | CornerBoxFactory | src/commands/box/BoxFactory.ts:143 |
+| create_box (alt) | ThreePointBoxFactory | src/commands/box/BoxFactory.ts:58 |
+| create_sphere | SphereFactory | src/commands/sphere/SphereFactory.ts:14 |
+| create_cylinder | CylinderFactory | src/commands/cylinder/CylinderFactory.ts:20 |
+| move | MoveItemFactory | src/commands/translate/TranslateItemFactory.ts:132 |
+| rotate | RotateItemFactory | src/commands/translate/TranslateItemFactory.ts:158 |
+| scale | BasicScaleFactory | src/commands/translate/TranslateItemFactory.ts:204 |
+| scale (alt) | FreestyleScaleFactory | src/commands/translate/TranslateItemFactory.ts:220 |
+| boolean_union | BooleanFactory | src/commands/boolean/BooleanFactory.ts:27 |
+| boolean_union (multi) | MultiBooleanFactory | src/commands/boolean/BooleanFactory.ts:259 |
+| boolean_subtract | BooleanFactory (operation="difference") | src/commands/boolean/BooleanFactory.ts:27 |
+| boolean_intersect | BooleanFactory (operation="intersection") | src/commands/boolean/BooleanFactory.ts:27 |
+| fillet_edges | MultiFilletFactory | src/commands/fillet/FilletFactory.ts:237 |
+| fillet_edges (single) | FilletFactory | src/commands/fillet/FilletFactory.ts:29 |
+| extrude_face | FaceExtrudeFactory | src/commands/extrude/ExtrudeFactory.ts:100 |
+| extrude_face (alt) | PossiblyBooleanFaceExtrudeFactory | src/commands/extrude/ExtrudeFactory.ts:176 |
+| mirror | MirrorFactory | src/commands/mirror/MirrorFactory.ts:27 |
+| duplicate | (UNRESOLVED — see anomaly below) | src/commands/duplicate/DuplicateCommand.ts (Command, not Factory) |
+
+All `path:line` entries above were obtained from a single grep sweep at execution time:
+```
+rtk grep -n -E '^export (default )?class \w*Factory' src/commands/
+```
+and re-verified by reading the source line at each position. The lines match (e.g., `BoxFactory.ts:143 → export class CornerBoxFactory extends DiagonalBoxFactory`).
+
+**Note on plural directory naming:** All factories live under `src/commands/<category>/` (PLURAL). The mutex re-entrancy investigation in DISC-07 reads `src/command/GeometryFactory.ts` (SINGULAR — base class for ALL factories). Both spellings are correct for their respective contexts; this is NOT a typo to fix.
+
+**Anomalies surfaced:**
+
+1. **REG-13 `duplicate` has no `DuplicateFactory` class.** `src/commands/duplicate/` contains only `DuplicateCommand.ts` which extends `Command` (line 7: `export class DuplicateCommand extends Command`), not `GeometryFactory`. Phase 3 planning must resolve this — options: (a) wrap `db.duplicate(item)` directly in the AutomationBridge dispatcher; (b) find an undocumented factory the grep missed (none surfaced — a tree-wide grep for `class \w*Duplicate\w*Factory` returned zero hits); (c) re-implement duplicate as a thin factory shim. **Recommendation:** Option (a), since duplicate semantically does not need transactional commit semantics — it just calls a method on the database and returns the new item's SimpleName.
+
+2. **REG-06 `scale`** — `ScaleItemFactory` (the name REQUIREMENTS.md uses) does not exist. The actual classes are `BasicScaleFactory` (line 204) and `FreestyleScaleFactory` (line 220) in `src/commands/translate/TranslateItemFactory.ts`. Phase 3 should pick `BasicScaleFactory` for the v1 wire `scale` (Freestyle is gizmo-driven and not appropriate for headless API). REQUIREMENTS.md should be reconciled at the next requirements touch to name `BasicScaleFactory`.
+
+3. **Path corrections applied:** Earlier CONTEXT.md and STATE.md examples used `src/commands/box/BoxFactory.ts:47` for `CornerBoxFactory`. The correct line is **143**. Line 47 is inside `BoxFactory` (the abstract base class `export abstract class BoxFactory` — a different class from `CornerBoxFactory`).
+
+4. **Additional classes available for richer Phase 3 surface (v1.1 candidates):**
+   - `PossiblyBooleanThreePointBoxFactory` / `PossiblyBooleanCenterBoxFactory` / `PossiblyBooleanCornerBoxFactory` (`src/commands/box/BoxFactory.ts:226, 240, 244`) — these combine primitive creation with an optional boolean against a selected solid in one factory. If Phase 3 wants a "create box with immediate boolean" wire, these are the base.
+   - `PossiblyBooleanSphereFactory` (`src/commands/sphere/SphereFactory.ts:40`) and `PossiblyBooleanCylinderFactory` (`src/commands/cylinder/CylinderFactory.ts:105`) — analogous for sphere/cylinder.
+   - `SymmetryFactory` (`src/commands/mirror/MirrorFactory.ts:72`) and `MultiSymmetryFactory` (`:260`) — richer mirror semantics (keep original + join).
+
+**Reference:**
+- PATTERNS.md line 44 noted the corrected `CornerBoxFactory:143` line.
+- All other lines verified by `rg -n` at execution time (see grep sweep output captured during Task 3 execution).
+
