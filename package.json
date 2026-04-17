@@ -12,6 +12,7 @@
         "make": "electron-forge make",
         "publish": "electron-forge publish",
         "lint": "eslint --ext .ts .",
+        "lint:spdx": "! rg --files-without-match 'SPDX-License-Identifier' -g '!LICENSE' src/automation plasticity-mcp-bridge",
         "generate": "node generate/src/generate.mjs",
         "build": "node-gyp build -j max",
         "rebuild": "node-gyp rebuild -j max",
