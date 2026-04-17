@@ -142,3 +142,66 @@ Phase 1 may proceed to USE these deps in source code once the TS upgrade (or zod
 
 **Reference:** PATTERNS.md line 43 noted the missing `preferences/` directory; this section confirms that finding and additionally maps the sole in-app trigger (`TitleBar.tsx:70`) that Phase 5 must wire to a real panel component.
 
+
+## DISC-03 — c3d.SimpleName type and topology string formats
+
+**Verified:** 2026-04-17
+
+**Files inspected:**
+- `generate/templates/c3d.d.ts:2` — type declaration
+- `src/kernel/kernel.ts` — confirms one-line re-export (NOT the declaration site, contrary to original CONTEXT.md DISC-03 wording)
+- `src/visual_model/VisualModel.ts:148, 293, 355` — three topology string formatters
+
+**Question (REQ-DISC-03):** Confirm the exact format of `c3d.SimpleName` (numeric) and the three topology string IDs (`edge,{parentId},{index}`, `face,{parentId},{index}`, `control-point,{parentId},{index}`).
+
+**Findings:**
+
+- `c3d.SimpleName` declaration at `generate/templates/c3d.d.ts:2`:
+  ```
+  declare type SimpleName = number;
+  ```
+  (This appears inside `declare module "*c3d.node" { ... }` at line 1, so the exported symbol is `c3d.SimpleName = number` once imported.)
+- `src/kernel/kernel.ts` content (one line, confirms re-export only):
+  ```
+  export * from '../../build/Release/c3d.node';
+  ```
+  No `.d.ts` file exists at `src/kernel/kernel.d.ts`. The type comes from the generator template and flows through the `*c3d.node` module-declaration ambient merge.
+- Topology string formatters in `src/visual_model/VisualModel.ts`:
+  - Control-point at `src/visual_model/VisualModel.ts:148`: `` return `control-point,${parentId},${index}`; ``
+    (inside `static simpleName(parentId: c3d.SimpleName, index: number)` on `class ControlPoint extends THREE.Object3D`)
+  - Edge at `src/visual_model/VisualModel.ts:293`: `` return `edge,${parentId},${index}`; ``
+    (inside `static simpleName(parentId: c3d.SimpleName, index: number)` on `class CurveEdge extends Edge`)
+  - Face at `src/visual_model/VisualModel.ts:355`: `` return `face,${parentId},${index}`; ``
+    (inside `static simpleName(parentId: c3d.SimpleName, index: number)` on `class Face extends TopologyItem`)
+
+All three formatters use the same pattern `kind,parentId,index` with **comma** separators (not colons), parentId is a numeric `c3d.SimpleName`, index is a JS number. These strings are what the wire schema's `{kind, id}` discriminated union should represent on the `id` field for topology-type references.
+
+**Note (path correction carried forward to all later phases):** `c3d.SimpleName` is declared in `generate/templates/c3d.d.ts:2` (the codegen template), NOT in `src/kernel/kernel.d.ts` (which does not exist as a `.d.ts`; the file is `kernel.ts` and is a one-line re-export of the built `c3d.node` native binding). **REQUIREMENTS.md's DISC-03 wording referring to `src/kernel/kernel.d.ts` is incorrect and should be reconciled at the next requirements touch** — the real declaration path is `generate/templates/c3d.d.ts`.
+
+**Reference:** PATTERNS.md path correction #2.
+
+---
+
+## DISC-04 — c3d.SimpleName session-scope stability across save/reload
+
+**Verified:** 2026-04-17
+
+**Resolution path:** A — synthesized from STATE.md + PROJECT.md + PITFALLS.md (documentation chain is consistent; no in-repo contradiction; no runtime experiment needed for Phase 0 scaffolding).
+
+**Source(s):**
+- STATE.md "Correction Notes Carried Forward" bullet 3: "`c3d.SimpleName` is stable within a session but NOT across file save/reload (and topology IDs NOT stable across mutations) — bridge must re-fetch IDs via `list_objects` when needed; document in FORK.md."
+- PROJECT.md key decisions and constraints reinforce ID-only-over-wire data flow (IDs are serializable; full `c3d.Item` instances are non-cloneable and must not cross IPC).
+- PITFALLS.md Pitfall #1 (Serializing non-cloneable geometry across IPC) treats `c3d.SimpleName` as the canonical wire-safe identifier — it is the one stable-within-session handle the bridge can safely pass.
+
+**Finding:**
+- Stable within a session: **CONFIRMED via documentation chain**. While Plasticity is running and the same document is open, a given `c3d.SimpleName` numeric handle continues to resolve to the same underlying item. This is the foundation on which the factory-over-wire design rests — without intra-session stability, no agent call that returns an ID could be used by a subsequent call.
+- Stable across save/reload: **NOT STABLE** — on file save + reopen, the C3D native layer re-numbers items. The bridge must NOT cache SimpleName values across file boundaries, and Claude Code (via the bridge) must re-issue `list_objects` after any file-level event.
+- Stable across mutations to the same parent: **topology IDs NOT stable** — a boolean or fillet that re-tessellates a parent solid invalidates all `edge,N,i` / `face,N,i` strings on that parent. SimpleName for top-level items is more durable (the parent solid survives many operations with the same SimpleName), but no formal guarantee — treat as stable within one operation chain, re-fetch after any topology-altering factory commit.
+
+**Implication for downstream phases:**
+- Phase 1 (Transport): wire schema for IDs uses tagged-union `{kind, id}` per REQ-DISP-02; the `id` field is the SimpleName (number) for items, the topology string (`edge,N,i` etc.) for edges/faces/control-points.
+- Phase 3 (Factory Registry v1): `list_objects` MUST be re-callable any time; bridge / agent should NOT memoize IDs across file save/reload boundaries; every factory call receiving topology IDs needs to handle `ITEM_NOT_FOUND` gracefully in case the agent is working against stale IDs.
+- Phase 6 (Verification & Publish): VER-08 undo/redo interleaving test should explicitly cover SimpleName re-resolution after save/reload, and topology-ID invalidation after a boolean on the same parent.
+
+**Reference:** STATE.md correction note carried forward; PITFALLS.md Pitfall #1; PROJECT.md "Key Decisions Locked" table.
+
