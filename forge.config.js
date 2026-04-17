@@ -45,6 +45,10 @@ module.exports = {
     ],
     "plugins": [
         [
+            "@electron-forge/plugin-auto-unpack-natives",
+            {}
+        ],
+        [
             "@electron-forge/plugin-webpack",
             {
                 "devContentSecurityPolicy": "img-src blob: 'self' ; default-src 'self' 'unsafe-inline' data:; script-src 'self' 'unsafe-eval' 'unsafe-inline' data:",
