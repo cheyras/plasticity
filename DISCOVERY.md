@@ -75,3 +75,70 @@ Phase 1 may proceed to USE these deps in source code once the TS upgrade (or zod
 - yarn add output (truncated to last 20 lines): see `.planning/phases/00-fork-hygiene-discovery/00-03-SUMMARY.md`
 - forge.config.js plugin position: plugin added as the FIRST entry in the `plugins` array (line 47), above the existing `@electron-forge/plugin-webpack` block.
 - yarn.lock ws entry: lines 15207–15220.
+
+## DISC-02 — Preferences merge cascade in ConfigFiles.ts
+
+**Verified:** 2026-04-17
+
+**Files inspected:**
+- `src/startup/ConfigFiles.ts:70-81` — `loadSettings()` invokes the merge
+- `src/startup/ConfigFiles.ts:139-148` — the `merge()` function itself
+- `src/startup/default-settings.js` — the cascade source (currently 14 lines; defines `Viewport` and `OrbitControls` only)
+
+**Question (REQ-DISC-02):** When `automation: {...}` is added to `default-settings.js` and the user's existing `settings.json` is missing the `automation` key, does the merge yield the defaults?
+
+**Method:** Read the merge function in ConfigFiles.ts; classify it (shallow `Object.assign` / deep `_.merge` / custom recursive). Reason about the behavior on a missing top-level key vs a partial override.
+
+**Findings:**
+- Merge function: `merge(canon, custom)` at `src/startup/ConfigFiles.ts:139`
+- Merge type: **custom recursive, canon-keyed**. Source:
+  ```js
+  function merge(canon, custom) {
+      for (const [k, v] of Object.entries(canon)) {
+          if (custom[k] === undefined) continue;
+          if (typeof v === 'object') {
+              merge(canon[k], custom[k]);
+          } else {
+              canon[k] = custom[k];
+          }
+      }
+  }
+  ```
+  It iterates keys from `canon` (the defaults). For each default key absent in `custom`, the default is preserved. For object values, it recurses. For primitives, it overwrites. The defaults object is **mutated in place** and returned from `loadSettings()`.
+- Behavior on missing top-level `automation` key: **defaults apply** — the `for` loop hits `automation` in `canon`, `custom[automation]` is `undefined`, `continue` — defaults preserved intact.
+- Behavior on partial user override `{automation: {port: 9000}}`: **other fields KEPT** — the recursion enters `automation`, iterates default keys (`enabled`, `port`, `host`, `token`, etc.), only `port` has a matching user key, others hit `continue` and stay at their default. This is the ideal cascade semantic for nested config.
+- Note on write-back: `loadSettings` returns the (now-mutated) `defaultSettings` object. Phase 1 code that reads `defaultSettings.automation` after this function runs gets user-merged values. Do NOT cache `defaultSettings` before `loadSettings()` has been called.
+- Caveat: since `custom`-only keys are ignored, typos in `settings.json` (e.g., `Automation` instead of `automation`) silently use defaults — no warning. Acceptable for v1; consider a "keys unknown to defaults" warning in Phase 5.
+- Implication for Phase 1: Phase 1's preferences schema can rely on the natural cascade — a missing `automation` block yields the defaults, a partial block merges correctly. No explicit zod-side spread-on-miss logic needed. However, the schema should still `safeParse` the final merged object to catch invalid user-supplied values (e.g., `port: "eight-thousand"`).
+
+**Reference:** STACK.md and PROJECT.md both assume the defaults-cascade-on-absence behavior. This finding **CONFIRMS** that assumption and additionally verifies deep-merge semantics for nested overrides.
+
+---
+
+## DISC-06 — Preferences UI panel location
+
+**Verified:** 2026-04-17
+
+**Files inspected:**
+- `src/components/` subdirectory listing: `atom/ clipboard/ creators/ dialog/ menu/ outliner/ pane/ planes/ snaps/ stats/ title-bar/ toolbar/ tooltip/ undo-history/ viewport/`
+- Grep of the entire `src/` tree for `preferences|Preferences|UserSettings`
+
+**Question (REQ-DISC-06):** Where is the Preferences UI panel component, so Phase 5 knows what to extend?
+
+**Method:** Directory listing of `src/components/`; grep of `src/` for preferences/settings identifiers; inspection of `src/components/title-bar/TitleBar.tsx:70` (the only in-src reference).
+
+**Findings:**
+- `src/components/preferences/` directory: **does NOT exist** (confirmed via filesystem listing above).
+- Files containing the word "preferences" / "Preferences" in `src/components/`: only one match —
+  ```
+  src/components/title-bar/TitleBar.tsx:70: <button ... tabIndex={-1} data-command="preferences:settings">
+  ```
+  This is a title-bar button that dispatches the command `preferences:settings`. No handler for that command exists anywhere in `src/` — the command dispatches to whatever platform-level handler opens the raw `~/.plasticity/settings.json` file in an external editor (Plasticity's upstream convention: settings are hand-edited JSON5, no in-app panel).
+- Existing settings/preferences UI surfaces: **none** — the title-bar button is the only user-facing surface, and it does not open an in-app panel.
+- Menu integration point: `src/components/title-bar/TitleBar.tsx:70` is the current entry point; no handler currently wires the command to a panel.
+- Candidate `atom/` components: `src/components/atom/` contains shared low-level widgets (inputs, sliders) usable for building a preferences panel, but no preferences-specific atom exists.
+
+**Conclusion:** Phase 5 will build the panel from scratch. Recommended: create `src/components/preferences/` mirroring the sibling `src/components/dialog/` pattern (React-ish TSX components rendered inside the renderer). Phase 5 will also need to add a command handler for `preferences:settings` that opens the panel (instead of — or in addition to — the current external-file behavior), or add a new command `preferences:automation` that targets the new panel specifically so the existing JSON5-editing workflow is preserved for power users.
+
+**Reference:** PATTERNS.md line 43 noted the missing `preferences/` directory; this section confirms that finding and additionally maps the sole in-app trigger (`TitleBar.tsx:70`) that Phase 5 must wire to a real panel component.
+
